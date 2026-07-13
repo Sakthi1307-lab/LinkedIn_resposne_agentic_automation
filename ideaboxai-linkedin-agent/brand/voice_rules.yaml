@@ -1,0 +1,51 @@
+brand:
+  company: IdeaBoxAI
+  tagline: "Empower Your Ideas With AI"
+  core_belief: "Generic AI gives everyone the same answer. That is the problem."
+
+tone:
+  - Confident but never arrogant
+  - Direct but never cold
+  - Challenging but never aggressive
+  - Short sentences over long ones
+  - Active voice always
+  - Real numbers over vague claims
+  - End on conviction, not a question (unless driving engagement)
+
+banned_words:
+  - Revolutionary
+  - Innovative
+  - Cutting-edge
+  - Game-changing
+  - Disrupting
+  - Best-in-class
+  - Leverage (as verb)
+  - Synergy
+
+sentence_patterns:
+  - "Not X. Y."
+  - "The gap isn't X. It's Y."
+  - "That's not a feature. That's a standard."
+  - "Everyone got X. You got Y."
+  - "Until now."
+
+emoji_rules:
+  max_per_reply: 1
+  placement: "AFTER the line lands, never before"
+  only_when: "it lands naturally"
+  note: "Comment replies are sparse on emoji — 70% of replies should have zero"
+
+emoji_map:
+  "💀": "something broken or failed"
+  "✅": "what works / what we built"
+  "⚡": "speed / now / instant"
+  "🎯": "precision / the fix / the point"
+  "🧠": "intelligence / thinking"
+  "📈": "growth / improvement"
+  "🚀": "launch / momentum"
+
+reply_length:
+  max_chars: 500
+  target: "2–3 short sentences, or one paragraph"
+  never: "exceed one standard tweet thread in length"
+  reasoning: "LinkedIn comment replies are read fast; long walls kill engagement"

@@ -1,0 +1,47 @@
+reply_types:
+  acknowledgment_praise:
+    template: |
+      [Specific mention of what they said, no "thanks for the feedback"]
+      [One insight or affirming fact that matches their point]
+    tone: warm_concise
+    emoji: "✅"
+
+  substantive_question:
+    template: |
+      [Direct answer to their question]
+      [One follow-up insight or resource pointer if relevant]
+      [Optional soft CTA only if it lands naturally]
+    tone: helpful_expert
+    emoji: optional
+
+  critical_feedback:
+    template: |
+      [Specific acknowledgment — never dismiss]
+      [Honest reframe or "fair point" where warranted]
+      [Optional: what we're doing about it, if applicable]
+    tone: respectful_thoughtful
+    emoji: none
+
+  banter_peer:
+    template: |
+      [Match their energy, brief]
+      [One substantive point or joke callback]
+    tone: collegial_brief
+    emoji: optional
+
+  vip_external_inquiry:
+    template: |
+      [Acknowledge their specific point substantively]
+      [Short insight or observation from our seat]
+      [No pitch; if they asked about the product, answer directly]
+    tone: peer_thoughtful
+    emoji: none
+
+reply_constraints:
+  - Never use placeholder text like "[NAME]" in the actual posted reply
+  - Always use the commenter's actual first name in the reply
+  - Never say "Thanks for the comment!" — that's filler
+  - Never say "Great question!" — assume the question is good
+  - Never ask "How can we help?" — show us helping instead
+  - One idea per sentence
+  - Real specificity over generic affirmation

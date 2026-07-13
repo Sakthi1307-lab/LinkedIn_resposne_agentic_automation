@@ -1,0 +1,9 @@
+.env
+*.db
+__pycache__/
+*.pyc
+/logs/*.log
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/

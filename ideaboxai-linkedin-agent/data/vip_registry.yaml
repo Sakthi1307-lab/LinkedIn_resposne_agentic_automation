@@ -1,0 +1,24 @@
+# VIP Registry — who deserves elevated reply tone/handling
+# Use LinkedIn URN (urn:li:person:XXXXXXX) as the key
+# This grows over time as you interact with external VIPs
+
+vips:
+  # INTERNAL — our own team
+  harish_ceo:
+    linkedin_urn: "urn:li:person:PLACEHOLDER_HARISH"
+    name: "Harish"
+    role: "Founder & CEO"
+    company: "IdeaBoxAI"
+    relationship_to_us: "self"
+    voice_note: "Sign CEO replies as 'Harish', first-name only. Collegial, direct."
+    reply_tier: "A_internal_leadership"
+
+  # EXTERNAL VIPs (add as they engage; example below)
+  # example_founder:
+  #   linkedin_urn: "urn:li:person:XXXXXXX"
+  #   name: "Jane Doe"
+  #   role: "Founder & CEO"
+  #   company: "ExampleCorp"
+  #   relationship_to_us: "external_vip_founder"
+  #   voice_note: "Peer-to-peer. Substantive first. No pitch."
+  #   reply_tier: "B_external_vip"
