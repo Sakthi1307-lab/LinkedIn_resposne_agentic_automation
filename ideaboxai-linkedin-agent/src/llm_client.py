@@ -1,11 +1,164 @@
+import logging
+from typing import Tuple
+
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+# OpenRouter exposes an OpenAI-compatible API at this base URL.
+# NOTE: the installed `openai` SDK is v1.x, which uses the client-object
+# pattern (OpenAI(...).chat.completions.create(...)) rather than the old
+# module-level openai.ChatCompletion.create() from the v0.x SDK.
+_client = OpenAI(
+    api_key=settings.openrouter_api_key,
+    base_url="https://openrouter.ai/api/v1",
+)
+
+# Exceptions worth retrying: rate limits, transient network issues, and
+# 5xx server errors. AuthenticationError is deliberately excluded — a bad
+# or expired key needs a human to fix it, and retrying just burns time
+# and 2 extra API calls while hiding the real problem.
+_RETRYABLE_EXCEPTIONS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
+
+
 class LLMClient:
+    """
+    OpenRouter LLM client with model routing and retry logic.
+    Models: Claude (high-quality), GPT-4 (balanced), GPT-3.5 (fast/cheap)
+    """
+
     def __init__(self):
-        pass
+        self.model_high_stakes = settings.openrouter_model_high_stakes
+        self.model_standard = settings.openrouter_model_standard
+        self.model_fast = settings.openrouter_model_fast
 
-    def select_model(self, persona_tier: str):
-        # TODO: implement in next prompt
-        return None
+        logger.info("LLMClient initialized:")
+        logger.info(f"  High-stakes model: {self.model_high_stakes}")
+        logger.info(f"  Standard model: {self.model_standard}")
+        logger.info(f"  Fast model: {self.model_fast}")
 
-    def generate_reply(self, system_prompt: str, user_message: str, model: str):
-        # TODO: implement in next prompt
-        return None
+    def select_model(self, persona_tier: str) -> str:
+        """
+        Route to the right model based on who we're replying to.
+
+        Tier logic:
+        - A_internal_leadership: High-stakes (settings.openrouter_model_high_stakes)
+        - B_external_vip: High-stakes (settings.openrouter_model_high_stakes)
+        - C_decision_maker: Standard (settings.openrouter_model_standard)
+        - D_general / anything else: Fast/cheap (settings.openrouter_model_fast)
+        """
+        if persona_tier in ("A_internal_leadership", "B_external_vip"):
+            return self.model_high_stakes
+        elif persona_tier == "C_decision_maker":
+            return self.model_standard
+        else:
+            return self.model_fast
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+        reraise=True,
+    )
+    def generate_reply(
+        self,
+        system_prompt: str,
+        user_message: str,
+        model: str,
+        max_tokens: int = 150,
+        temperature: float = 0.7,
+    ) -> Tuple[str, int]:
+        """
+        Call OpenRouter to generate a reply.
+
+        Args:
+            system_prompt: Brand voice + persona guidance
+            user_message: The engagement + context
+            model: Model name (e.g., settings.openrouter_model_high_stakes)
+            max_tokens: Max output tokens (default 150)
+            temperature: Creativity (0.7 = balanced)
+
+        Returns:
+            (generated_text, tokens_used)
+
+        Retries up to 3 times with exponential backoff on rate limits,
+        timeouts, connection errors, and 5xx server errors. Authentication
+        errors are NOT retried — they propagate immediately since retrying
+        a bad key can't ever succeed.
+        """
+        try:
+            logger.info(f"Generating reply with model: {model}")
+
+            response = _client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+            reply = response.choices[0].message.content.strip()
+            tokens = response.usage.total_tokens if response.usage else 0
+
+            logger.info(f"Reply generated ({model}): {tokens} tokens")
+            return reply, tokens
+
+        except AuthenticationError as e:
+            logger.error(f"OpenRouter authentication failed (check OPENROUTER_API_KEY): {e}")
+            raise
+        except RateLimitError as e:
+            logger.warning(f"OpenRouter rate limit, retrying: {e}")
+            raise
+        except (APITimeoutError, APIConnectionError) as e:
+            logger.warning(f"OpenRouter connectivity issue, retrying: {e}")
+            raise
+        except InternalServerError as e:
+            logger.warning(f"OpenRouter server error, retrying: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error generating reply: {e}", exc_info=True)
+            raise
+
+    def cost_estimate(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        """
+        Estimate cost of a request (for internal budget/spend tracking only).
+
+        This is a rough approximation using hardcoded per-model rates that
+        will drift out of date — it is NOT billing-grade accuracy and must
+        never be wired into an invoice or customer-facing cost figure. For
+        real billing, use OpenRouter's own usage/cost reporting.
+
+        Approximate pricing (as of 2024, $ per 1M tokens):
+        - Claude Sonnet: $3 input / $15 output
+        - GPT-4 Turbo: $10 input / $30 output
+        - GPT-3.5 Turbo: $0.50 input / $1.50 output
+        """
+        pricing = {
+            "anthropic/claude-sonnet-4.6": {"input": 3, "output": 15},
+            "openai/gpt-4-turbo": {"input": 10, "output": 30},
+            "openai/gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+        }
+
+        if model not in pricing:
+            logger.warning(f"No pricing info for model {model}, cost estimate unavailable")
+            return 0.0
+
+        rates = pricing[model]
+        cost = (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
+        return round(cost, 6)
+
+
+# Initialize singleton
+llm_client = LLMClient()
