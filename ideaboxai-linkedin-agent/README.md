@@ -4,6 +4,11 @@ Autonomous LinkedIn engagement agent. Monitors comments on the IdeaBoxAI
 company page, identifies who is engaging, and generates on-brand replies
 using an OpenRouter-backed LLM pipeline.
 
+**Full autonomy**: every reply that passes dedup/rate-limiting posts
+immediately. There is no approval step and no escalation queue. The only
+judgment call the agent makes is *what* to say and *how*, based on who's
+talking to us (persona tier) — never *whether* to reply.
+
 ## Setup
 
 1. Create a virtualenv and install dependencies:
@@ -56,7 +61,9 @@ using an OpenRouter-backed LLM pipeline.
 - `src/persona_resolver.py` — identifies who is engaging (stub)
 - `src/response_generator.py` — generates on-brand replies (stub)
 - `src/dedupe_and_rate_limit.py` — prevents duplicate/over-frequent replies (stub)
-- `src/escalation.py` — flags hostile/high-risk engagement for review (stub)
+- `src/escalation.py` — sentiment-based escalation logic; not wired into
+  `main.py`'s pipeline (full autonomy mode has no approval step), kept
+  available if you want to re-enable a manual-review gate later
 - `src/sentiment_analyzer.py` — classifies engagement sentiment (stub)
 - `brand/` — brand voice rules and reply templates
 - `data/vip_registry.yaml` — seed data for VIP contacts

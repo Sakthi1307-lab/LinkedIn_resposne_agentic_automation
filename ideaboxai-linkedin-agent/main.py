@@ -8,7 +8,6 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from config import settings
 from src.dedupe_and_rate_limit import DedupeAndRateLimit
-from src.escalation import escalation_handler
 from src.linkedin_client import linkedin_client
 from src.llm_client import llm_client
 from src.models import EngagementEvent, ReplyLog, SessionLocal
@@ -82,10 +81,14 @@ async def process_engagement(event_data: dict):
     1. Parse event and store in database
     2. Resolve WHO is engaging (persona resolver)
     3. Check dedup & rate limit
-    4. Check if escalation needed
-    5. Generate reply
+    4. Generate reply
+    5. Log the reply (audit trail)
     6. Post reply
-    7. Log everything
+
+    FULL AUTONOMY: every reply that passes dedup/rate-limit posts
+    immediately. There is no approval step and no escalation queue — the
+    only judgment call this pipeline makes is WHAT to say and HOW (handled
+    inside response_generator, based on persona), never WHETHER to reply.
     """
 
     db = SessionLocal()
@@ -135,20 +138,14 @@ async def process_engagement(event_data: dict):
             db.commit()
             return
 
-        # Step 4: Check escalation
-        should_escalate = escalation_handler.should_escalate(engagement_text, persona.tier)
-        if should_escalate:
-            engagement.escalated = True
-            engagement.processed = True
-            db.commit()
-            logger.warning("Engagement escalated to manual review")
-            return
-
-        # Step 5: Generate reply
+        # Step 4: Generate reply — no escalation gate. response_generator
+        # already builds the reply's tone/content around persona.tier
+        # (VIP, decision-maker, general, etc.); that persona-awareness is
+        # the only per-person judgment this pipeline applies.
         reply = response_generator.generate(engagement_text, persona, engagement_type)
         logger.info(f"Reply generated: {reply[:80]}...")
 
-        # Step 6: Log the reply before posting (for audit trail)
+        # Step 5: Log the reply before posting (for audit trail)
         model_used = llm_client.select_model(persona.tier)
         reply_log = ReplyLog(
             engagement_id=engagement.id,
@@ -161,7 +158,7 @@ async def process_engagement(event_data: dict):
         db.commit()
         logger.info(f"Reply logged (ID={reply_log.id})")
 
-        # Step 7: Post the reply (full autonomy)
+        # Step 6: Post the reply immediately — full autonomy, no approval step
         success = linkedin_client.post_reply(comment_urn, reply)
 
         if success:
@@ -259,7 +256,7 @@ async def startup():
     logger.info(f"  Database: {settings.database_url}")
     logger.info(f"  Organization URN: {settings.linkedin_organization_urn}")
     logger.info(f"  Debug mode: {settings.debug}")
-    logger.info(f"  Auto-escalate hostile: {settings.auto_escalate_hostile_comments}")
+    logger.info("  Mode: FULL AUTONOMY (no approval step, no escalation queue)")
     logger.info(f"  Max replies per person/hour: {settings.max_replies_per_person_per_hour}")
     logger.info("=" * 80)
 

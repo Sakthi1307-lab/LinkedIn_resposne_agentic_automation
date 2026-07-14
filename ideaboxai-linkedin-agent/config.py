@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Safety
-    auto_escalate_hostile_comments: bool = True
+    # Not consumed by main.py's pipeline — the agent runs full-autonomy
+    # (no approval step, no escalation queue). Only affects src/escalation.py
+    # if you re-wire it back into the pipeline yourself.
+    auto_escalate_hostile_comments: bool = False
     max_replies_per_person_per_hour: int = 3
     reply_dedup_window_hours: int = 24
 
