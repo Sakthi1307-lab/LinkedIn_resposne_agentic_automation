@@ -3,6 +3,7 @@ import re
 
 import yaml
 
+from config import settings
 from src.llm_client import llm_client
 from src.persona_resolver import PersonaContext
 
@@ -184,8 +185,18 @@ class ResponseGenerator:
         if any(kw in text_lower for kw in critical_keywords):
             return "critical_feedback"
 
-        # Detect question
-        if "?" in engagement_text:
+        # Detect a question OR an explicit request/intent that isn't phrased
+        # as a question — "I need a demo." and "How do I get a demo?" both
+        # want the same thing (a concrete next step), but only the second
+        # has a "?". Missing the first meant statements of intent fell into
+        # neutral_comment, which only asks the model to "add a point" rather
+        # than actually resolve the ask.
+        request_phrases = [
+            "i need", "i want", "send me", "can i get", "how can i get", "how do i get",
+            "sign me up", "book a demo", "get a demo", "see a demo", "want a demo",
+            "need a demo", "try it out", "free trial", "where can i", "interested in trying",
+        ]
+        if "?" in engagement_text or any(kw in text_lower for kw in request_phrases):
             return "substantive_question"
 
         # Detect praise
@@ -259,7 +270,7 @@ REPLY CONSTRAINTS:
         if content_type == "critical_feedback":
             content_guidance = "\nREPLY TYPE: CRITICAL FEEDBACK\nNever defensive. Never dismiss. Acknowledge their specific critique. Respond with substance or an honest 'fair point' where warranted."
         elif content_type == "substantive_question":
-            content_guidance = "\nREPLY TYPE: SUBSTANTIVE QUESTION\nAnswer their specific question concretely — name the thing they asked about. If you don't have an exact detail to give (a link, a process, a number), don't invent one; give an honest, concrete next step instead (e.g. 'reply here and we'll set it up directly'). Never respond with appreciation alone and no answer."
+            content_guidance = "\nREPLY TYPE: SUBSTANTIVE QUESTION OR REQUEST\nAnswer or resolve it concretely — name the thing they asked about. If KNOWN FACTS below has something relevant (e.g. a demo link), use it verbatim; that's the whole answer, don't pad it with extra filler. If you don't have an exact detail to give, don't invent one — give an honest, concrete next step instead (e.g. 'reply here and we'll set it up directly'). Never respond with appreciation alone and no answer."
         elif content_type == "acknowledgment_praise":
             content_guidance = "\nREPLY TYPE: ACKNOWLEDGMENT/PRAISE\nSpecific mention of what they said (no 'thanks for the feedback'). One insight or affirming fact."
         else:  # neutral_comment
@@ -285,7 +296,26 @@ LEGAL & COMPLIANCE (never break these — this reply posts automatically with no
 - Prefer "built to", "designed for", "can help with" over "will", "guarantees", "always".
 """
 
-        return base_prompt + tone + source_context + content_guidance + legal_block
+        known_facts = self._build_known_facts_block()
+
+        return base_prompt + tone + source_context + content_guidance + legal_block + known_facts
+
+    def _build_known_facts_block(self) -> str:
+        """
+        Real, verified details the LLM is allowed to state outright instead
+        of inventing one. Empty (no block at all) when nothing is
+        configured — an LLM told "use KNOWN FACTS if relevant" with an empty
+        list tends to hedge; omitting the section entirely is cleaner than
+        handing it a section that's always blank.
+        """
+        facts = []
+        if settings.demo_booking_url:
+            facts.append(f"- Demo booking link: {settings.demo_booking_url}")
+
+        if not facts:
+            return ""
+
+        return "\nKNOWN FACTS (real — use verbatim if relevant to their comment; never invent facts not listed here):\n" + "\n".join(facts) + "\n"
 
     def _build_user_message(self, engagement_text: str, persona: PersonaContext, content_type: str) -> str:
         """
@@ -441,7 +471,15 @@ said — not a generic template. Remember:
         if content_type == "critical_feedback":
             return f"{persona.name}, hearing this — looking into it directly."
         if content_type == "substantive_question":
-            return f"{persona.name}, good question — following up directly so you get a real answer."
+            # This category now also covers non-question requests ("I need
+            # a demo."), so "good question" would read oddly here — keep it
+            # neutral enough to fit both. If we have a real fact that
+            # answers a demo ask specifically, use it — the fallback is what
+            # actually posts when the LLM fails twice, so it should still be
+            # useful when we can make it useful.
+            if settings.demo_booking_url and "demo" in engagement_text.lower():
+                return f"{persona.name}, here you go: {settings.demo_booking_url}"
+            return f"{persona.name}, on it — following up directly so you get what you need."
         if len(engagement_text) < 50:
             return f"Thanks for the signal, {persona.name}. 🎯"
         else:

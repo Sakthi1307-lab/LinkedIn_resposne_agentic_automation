@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     max_replies_per_person_per_hour: int = 3
     reply_dedup_window_hours: int = 24
 
+    # Known facts the response generator can hand the LLM to answer with,
+    # instead of it having to invent a plausible-sounding but fake detail
+    # (e.g. "here's the link" with no real link to give). Optional — when
+    # unset, replies that need one of these facts fall back to an honest
+    # concrete next step instead of a link/number that doesn't exist.
+    demo_booking_url: Optional[str] = None
+
     # Slack
     slack_webhook_url: Optional[str] = None
     slack_alert_channel: str = "#ideaboxai-engage-alerts"
