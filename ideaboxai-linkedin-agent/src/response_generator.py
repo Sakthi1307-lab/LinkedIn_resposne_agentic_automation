@@ -14,6 +14,29 @@ class ResponseGenerator:
     Generates on-brand LinkedIn replies for different engagement types and personas.
     """
 
+    # This agent posts with zero human review, so these patterns exist to
+    # catch anything a reply shouldn't say regardless of how good it reads:
+    # guarantees/promises of outcomes, pricing/contract commitments, unverified
+    # certification claims, and regulated-advice framing (legal/medical/tax).
+    # Checked in _legal_lint() on every generated reply before it can post.
+    LEGAL_RISK_PATTERNS = [
+        r"\bguarantee[ds]?\b",
+        r"\bpromise[ds]?\b",
+        r"\b100%\s*(accurate|guaranteed|effective|safe|secure)\b",
+        r"\brisk[- ]free\b",
+        r"\bno risk\b",
+        r"\bnever fails?\b",
+        r"\balways works?\b",
+        r"\bmoney[- ]back\b",
+        r"\brefund\b",
+        r"\bfree forever\b",
+        r"\bcertified\b",
+        r"\bcompliant with\b",
+        r"\blegal advice\b",
+        r"\bmedical advice\b",
+        r"\b(financial|tax) advice\b",
+    ]
+
     def __init__(self):
         self.voice_rules = self._load_voice_rules()
         self.templates = self._load_templates()
@@ -50,23 +73,31 @@ class ResponseGenerator:
         Args:
             engagement_text: The comment/question/engagement
             persona: PersonaContext identifying who is engaging
-            engagement_type: "comment", "reaction", "mention", "dm"
+            engagement_type: "comment", "reaction", "mention", "dm" — changes
+                the CONTEXT framing in the prompt (e.g. a mention isn't a
+                direct question, a dm-sourced reply must stay safe to post
+                publicly). main.py's pipeline only posts for "comment" and
+                "mention"; other types are blocked before they reach
+                post_reply(), but this method still frames them correctly
+                since it's also reachable from /debug/preview-reply.
 
         Returns:
-            Generated reply text (ready to post). Always on-brand and safe —
-            falls back to _fallback_reply() if generation fails or the
-            output doesn't pass voice_lint(). There is no path that returns
-            an un-linted reply.
+            Generated reply text (ready to post). Always on-brand, legally
+            safe, and matched to what was actually said — falls back to
+            _fallback_reply() if generation fails or the output doesn't
+            pass _voice_lint()/_legal_lint(). There is no path that returns
+            an unlinted reply.
         """
 
-        # Step 1: Determine reply type based on engagement
-        reply_type = self._detect_reply_type(engagement_text)
+        # Step 1: Classify what was actually said (content) — independent
+        # of engagement_type, which classifies where it came from.
+        content_type = self._detect_content_type(engagement_text)
 
-        # Step 2: Build system prompt with brand voice + persona
-        system_prompt = self._build_system_prompt(persona, reply_type)
+        # Step 2: Build system prompt with brand voice + persona + engagement context
+        system_prompt = self._build_system_prompt(persona, content_type, engagement_type)
 
         # Step 3: Build user message with context
-        user_message = self._build_user_message(engagement_text, persona, reply_type)
+        user_message = self._build_user_message(engagement_text, persona, content_type)
 
         # Step 4: Select model based on persona tier (routing lives in llm_client)
         model = llm_client.select_model(persona.tier)
@@ -81,28 +112,40 @@ class ResponseGenerator:
                 temperature=0.7,
             )
 
-            logger.info(f"Generated reply ({persona.tier}): {reply[:80]}...")
+            logger.info(f"Generated reply ({persona.tier}, {content_type}): {reply[:80]}...")
 
-            # Step 6: Voice lint — the only quality gate; no bypass path
+            # Step 6: Voice + legal lint — the only quality gates; no bypass path
             if not self._voice_lint(reply):
                 logger.warning("Reply failed voice lint, falling back to safe reply")
-                return self._fallback_reply(persona, engagement_text)
+                return self._fallback_reply(persona, engagement_text, content_type)
+
+            if not self._legal_lint(reply):
+                logger.warning("Reply failed legal/compliance lint, falling back to safe reply")
+                return self._fallback_reply(persona, engagement_text, content_type)
 
             return reply
 
         except Exception as e:
             logger.error(f"Generation failed: {e}", exc_info=True)
-            return self._fallback_reply(persona, engagement_text)
+            return self._fallback_reply(persona, engagement_text, content_type)
 
-    def _detect_reply_type(self, engagement_text: str) -> str:
+    def _detect_content_type(self, engagement_text: str) -> str:
         """
-        Guess the engagement type based on text patterns.
-        Returns: acknowledgment_praise, substantive_question, critical_feedback, etc.
+        Classify what the person actually said, based on text patterns.
+        Returns one of: critical_feedback, substantive_question,
+        acknowledgment_praise, neutral_comment.
+
+        Order matters: a critical remark that also contains a question mark
+        ("this is broken, why?") should be handled as feedback first, and
+        praise keywords are checked before falling through — anything with
+        no signal in either direction is neutral_comment, not manufactured
+        praise. Treating "cool" or an off-topic remark as praise would make
+        the LLM invent enthusiasm the commenter never expressed.
         """
         text_lower = engagement_text.lower()
 
         # Detect critical feedback
-        critical_keywords = ["doesn't work", "broken", "problem", "issue", "fail", "bad", "hate"]
+        critical_keywords = ["doesn't work", "broken", "problem", "issue", "fail", "bad", "hate", "disappointed", "worst"]
         if any(kw in text_lower for kw in critical_keywords):
             return "critical_feedback"
 
@@ -111,16 +154,18 @@ class ResponseGenerator:
             return "substantive_question"
 
         # Detect praise
-        praise_keywords = ["great", "love", "amazing", "excellent", "brilliant", "thanks"]
+        praise_keywords = ["great", "love", "amazing", "excellent", "brilliant", "thanks", "awesome", "impressive"]
         if any(kw in text_lower for kw in praise_keywords):
             return "acknowledgment_praise"
 
-        # Default
-        return "acknowledgment_praise"
+        # No critical/question/praise signal — a neutral or off-topic
+        # remark. Don't force it into acknowledgment_praise.
+        return "neutral_comment"
 
-    def _build_system_prompt(self, persona: PersonaContext, reply_type: str) -> str:
+    def _build_system_prompt(self, persona: PersonaContext, content_type: str, engagement_type: str = "comment") -> str:
         """
-        Build the system prompt with brand voice + persona-specific tone.
+        Build the system prompt with brand voice + persona-specific tone +
+        engagement-source context + non-negotiable legal/compliance rules.
         """
 
         # Base brand voice
@@ -172,19 +217,39 @@ REPLY CONSTRAINTS:
         else:
             tone = "\nTONE: This is a general audience member. Warm, on-brand, brief. No CTA unless they asked a direct question."
 
-        # Reply-type specific guidance
-        if reply_type == "critical_feedback":
-            reply_guidance = "\nREPLY TYPE: CRITICAL FEEDBACK\nNever defensive. Never dismiss. Acknowledge their specific critique. Respond with substance or an honest 'fair point' where warranted."
-        elif reply_type == "substantive_question":
-            reply_guidance = "\nREPLY TYPE: SUBSTANTIVE QUESTION\nAnswer their question directly. One follow-up insight if relevant. Optional soft CTA only if it lands naturally."
-        elif reply_type == "acknowledgment_praise":
-            reply_guidance = "\nREPLY TYPE: ACKNOWLEDGMENT/PRAISE\nSpecific mention of what they said (no 'thanks for the feedback'). One insight or affirming fact."
-        else:
-            reply_guidance = ""
+        # Content-type specific guidance — what they actually said
+        if content_type == "critical_feedback":
+            content_guidance = "\nREPLY TYPE: CRITICAL FEEDBACK\nNever defensive. Never dismiss. Acknowledge their specific critique. Respond with substance or an honest 'fair point' where warranted."
+        elif content_type == "substantive_question":
+            content_guidance = "\nREPLY TYPE: SUBSTANTIVE QUESTION\nAnswer their question directly. One follow-up insight if relevant. Optional soft CTA only if it lands naturally."
+        elif content_type == "acknowledgment_praise":
+            content_guidance = "\nREPLY TYPE: ACKNOWLEDGMENT/PRAISE\nSpecific mention of what they said (no 'thanks for the feedback'). One insight or affirming fact."
+        else:  # neutral_comment
+            content_guidance = "\nREPLY TYPE: NEUTRAL/GENERAL COMMENT\nThey didn't express praise, criticism, or a question — don't manufacture enthusiasm they didn't show. Acknowledge specifically what they said and add one genuine, concrete point."
 
-        return base_prompt + tone + reply_guidance
+        # Engagement-source context — where this came from changes what a
+        # sensible reply looks like, independent of what was said.
+        if engagement_type == "mention":
+            source_context = "\nCONTEXT: They mentioned/tagged IdeaBoxAI in their own post or comment — this is not a direct question to us. Acknowledge the specific mention and add value; don't assume they're addressing us."
+        elif engagement_type == "reaction":
+            source_context = "\nCONTEXT: This is a reaction (like/celebrate/etc.), not a written comment. Keep any acknowledgment minimal and specific — don't invent a conversation that didn't happen."
+        elif engagement_type == "dm":
+            source_context = "\nCONTEXT: This originated as a private message. This text may end up posted publicly, so write nothing that assumes privacy — keep it appropriate for a public audience."
+        else:  # comment (default)
+            source_context = "\nCONTEXT: This is a direct comment on our own company page post — a normal public reply thread."
 
-    def _build_user_message(self, engagement_text: str, persona: PersonaContext, reply_type: str) -> str:
+        legal_block = """
+LEGAL & COMPLIANCE (never break these — this reply posts automatically with no human review):
+- Never guarantee, promise, or imply a specific outcome, result, ROI, or performance number for the reader (no "will increase", "guaranteed", "always works", "100%", "risk-free").
+- Never state pricing, discounts, refunds, or contract terms that aren't already public.
+- Never claim a certification, compliance standard, or partnership (e.g. SOC2, HIPAA, GDPR) unless it's a verified public fact — if unsure, don't mention it.
+- Never give legal, medical, tax, or financial advice, even if directly asked — acknowledge the question and redirect to a real conversation instead of answering the substance.
+- Prefer "built to", "designed for", "can help with" over "will", "guarantees", "always".
+"""
+
+        return base_prompt + tone + source_context + content_guidance + legal_block
+
+    def _build_user_message(self, engagement_text: str, persona: PersonaContext, content_type: str) -> str:
         """
         Build the user message that gives the LLM context.
         """
@@ -193,12 +258,14 @@ Engagement from {persona.name} ({persona.tier}, confidence={persona.confidence_s
 
 "{engagement_text}"
 
-Generate a natural-sounding reply. Remember:
+Generate a natural-sounding, human reply that actually responds to what they
+said — not a generic template. Remember:
 - Use {persona.name}'s actual first name in the reply
 - Be specific to what they said
 - Stay under 500 characters
 - No placeholder text
 - No banned words
+- No guarantees, promises, pricing, or compliance claims
 - Max 1 emoji (probably 0)
 """
 
@@ -207,8 +274,9 @@ Generate a natural-sounding reply. Remember:
         Quality gate: does this reply pass brand voice checks?
         Returns True if it passes, False if it should be regenerated.
 
-        This is the only quality gate in the pipeline — generate() has no
-        path that returns an unlinted reply.
+        Paired with _legal_lint() as the only two quality gates in the
+        pipeline — generate() has no path that returns a reply that failed
+        either one.
         """
 
         reply_lower = reply.lower()
@@ -251,11 +319,31 @@ Generate a natural-sounding reply. Remember:
 
         return True
 
-    def _fallback_reply(self, persona: PersonaContext, engagement_text: str) -> str:
+    def _legal_lint(self, reply: str) -> bool:
+        """
+        Compliance gate: this agent posts with zero human review, so a reply
+        must never ship a guarantee, refund/pricing commitment, unverified
+        certification claim, or regulated-advice statement (legal/medical/
+        financial/tax). Returns True if the reply is clear of those risk
+        patterns, False if it should fall back to a safe canned reply.
+        """
+        reply_lower = reply.lower()
+        for pattern in self.LEGAL_RISK_PATTERNS:
+            if re.search(pattern, reply_lower):
+                logger.warning(f"Reply failed legal lint: matched pattern '{pattern}'")
+                return False
+        return True
+
+    def _fallback_reply(self, persona: PersonaContext, engagement_text: str, content_type: str = "neutral_comment") -> str:
         """
         Fallback if generation or lint fails.
-        Still on-brand, still safe.
+        Still on-brand, still safe, and matched to content_type so a
+        complaint doesn't get the same chipper one-liner as a compliment.
         """
+        if content_type == "critical_feedback":
+            return f"{persona.name}, hearing this — looking into it directly."
+        if content_type == "substantive_question":
+            return f"{persona.name}, good question — following up directly so you get a real answer."
         if len(engagement_text) < 50:
             return f"Thanks for the signal, {persona.name}. 🎯"
         else:

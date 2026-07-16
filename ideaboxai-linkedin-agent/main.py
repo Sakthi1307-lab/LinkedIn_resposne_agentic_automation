@@ -34,6 +34,15 @@ app = FastAPI(
 
 scheduler = AsyncIOScheduler()
 
+# linkedin_client.post_reply() only knows how to post a public comment reply
+# via the Community Management API's /mmComments endpoint — there is no DM
+# path (send_dm() is an explicit unsupported stub) and no separate "reaction"
+# posting semantics. Auto-posting a dm- or reaction-sourced payload through
+# post_reply() would either post private conversation content publicly or
+# attach a reply to a URN that was never a real comment thread. Only these
+# two engagement types are safe to carry all the way to a public post.
+SUPPORTED_PUBLIC_REPLY_TYPES = {"comment", "mention"}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK ENDPOINT — LinkedIn pushes engagement events here
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -132,6 +141,17 @@ async def process_engagement(event_data: dict):
         db.add(engagement)
         db.commit()
         logger.info(f"Engagement stored (ID={engagement.id})")
+
+        if engagement_type not in SUPPORTED_PUBLIC_REPLY_TYPES:
+            logger.warning(
+                f"engagement_type={engagement_type!r} is not eligible for automatic public "
+                f"reply (comment_urn={comment_urn[:50]}...); this client can only post public "
+                f"comment replies, and doing so with dm/reaction-sourced content would leak a "
+                f"private exchange or post to an invalid thread. Skipping without replying."
+            )
+            engagement.processed = True
+            db.commit()
+            return
 
         # Step 2: Resolve persona
         resolver = PersonaResolver(db)
