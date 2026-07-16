@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Tuple
 
 from openai import (
@@ -15,14 +16,16 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# OpenRouter exposes an OpenAI-compatible API at this base URL.
-# NOTE: the installed `openai` SDK is v1.x, which uses the client-object
-# pattern (OpenAI(...).chat.completions.create(...)) rather than the old
-# module-level openai.ChatCompletion.create() from the v0.x SDK.
-_client = OpenAI(
-    api_key=settings.openrouter_api_key,
-    base_url="https://openrouter.ai/api/v1",
-)
+_client = None
+if settings.openrouter_api_key:
+    # OpenRouter exposes an OpenAI-compatible API at this base URL.
+    # NOTE: the installed `openai` SDK is v1.x, which uses the client-object
+    # pattern (OpenAI(...).chat.completions.create(...)) rather than the old
+    # module-level openai.ChatCompletion.create() from the v0.x SDK.
+    _client = OpenAI(
+        api_key=settings.openrouter_api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
 
 # Exceptions worth retrying: rate limits, transient network issues, and
 # 5xx server errors. AuthenticationError is deliberately excluded — a bad
@@ -97,6 +100,10 @@ class LLMClient:
         a bad key can't ever succeed.
         """
         try:
+            if _client is None:
+                logger.warning("OPENROUTER_API_KEY is not configured; using local fallback reply")
+                return self._fallback_reply(system_prompt, user_message), 0
+
             logger.info(f"Generating reply with model: {model}")
 
             response = _client.chat.completions.create(
@@ -130,6 +137,22 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Unexpected error generating reply: {e}", exc_info=True)
             raise
+
+    def _fallback_reply(self, system_prompt: str, user_message: str) -> str:
+        """
+        Local offline reply used when OpenRouter is unavailable.
+
+        This keeps local personal-account testing unblocked without external
+        API credentials.
+        """
+        match = re.search(r'Engagement from (.+?) \(', user_message)
+        name = match.group(1) if match else "there"
+
+        if "critical_feedback" in system_prompt:
+            return f"Fair point, {name}. We’re looking at this closely and want to improve the experience."
+        if "substantive_question" in system_prompt:
+            return f"Good question, {name}. We keep the approach focused and practical so the answer stays useful."
+        return f"Appreciate the note, {name}. That’s exactly the kind of signal we want to hear."
 
     def cost_estimate(self, model: str, input_tokens: int, output_tokens: int) -> float:
         """

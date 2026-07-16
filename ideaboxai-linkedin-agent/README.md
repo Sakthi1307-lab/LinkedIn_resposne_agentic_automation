@@ -31,6 +31,17 @@ talking to us (persona tier) — never *whether* to reply.
    - `LINKEDIN_WEBHOOK_VERIFICATION_TOKEN` — shared secret for webhook signature checks
    - `OPENROUTER_API_KEY` — OpenRouter API key for LLM access
 
+   For local personal-account testing, set `LOCAL_TEST_MODE=true`. In that mode the
+   webhook accepts requests with the `X-Local-Test: true` header and the polling job
+   stays disabled so the app does not call org-only LinkedIn endpoints.
+
+   You can also POST a payload directly to `POST /debug/test-engagement` when both
+   `DEBUG=true` and `LOCAL_TEST_MODE=true` are set.
+
+   If you only want to see the reply the agent would write for a personal-account
+   comment, use `POST /debug/preview-reply`. That endpoint returns the generated
+   reply immediately and does not try to post to LinkedIn.
+
 3. Verify configuration loads and the database is created:
 
    ```bash

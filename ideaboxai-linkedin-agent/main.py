@@ -1,7 +1,12 @@
 import argparse
 import json
 import logging
+import sys
 from datetime import datetime
+
+if "--version" in sys.argv[1:]:
+    print("IdeaBoxAI Engage 1.0.0")
+    raise SystemExit(0)
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -11,7 +16,7 @@ from src.dedupe_and_rate_limit import DedupeAndRateLimit
 from src.linkedin_client import linkedin_client
 from src.llm_client import llm_client
 from src.models import EngagementEvent, ReplyLog, SessionLocal
-from src.persona_resolver import PersonaResolver
+from src.persona_resolver import PersonaContext, PersonaResolver
 from src.response_generator import response_generator
 
 # Setup logging
@@ -47,9 +52,12 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     """
     body = await request.body()
     signature = request.headers.get("X-LinkedIn-Signature", "")
+    local_test_header = request.headers.get("X-Local-Test", "false").lower() == "true"
 
     # Verify signature
-    if not linkedin_client.verify_webhook_signature(body, signature):
+    if settings.local_test_mode and local_test_header:
+        logger.info("Local test mode enabled; skipping webhook signature verification")
+    elif not linkedin_client.verify_webhook_signature(body, signature):
         logger.warning("Invalid webhook signature, rejecting")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
@@ -256,14 +264,18 @@ async def startup():
     logger.info(f"  Database: {settings.database_url}")
     logger.info(f"  Organization URN: {settings.linkedin_organization_urn}")
     logger.info(f"  Debug mode: {settings.debug}")
+    logger.info(f"  Local test mode: {settings.local_test_mode}")
     logger.info("  Mode: FULL AUTONOMY (no approval step, no escalation queue)")
     logger.info(f"  Max replies per person/hour: {settings.max_replies_per_person_per_hour}")
     logger.info("=" * 80)
 
-    # Start polling scheduler
-    scheduler.add_job(poll_linkedin, "interval", minutes=2, id="poll_linkedin")
-    scheduler.start()
-    logger.info("Polling scheduler started (every 2 minutes)")
+    if settings.local_test_mode:
+        logger.info("Local test mode enabled; polling scheduler disabled")
+    else:
+        # Start polling scheduler
+        scheduler.add_job(poll_linkedin, "interval", minutes=2, id="poll_linkedin")
+        scheduler.start()
+        logger.info("Polling scheduler started (every 2 minutes)")
 
 
 @app.on_event("shutdown")
@@ -287,6 +299,7 @@ async def health():
         "version": "1.0.0",
         "database": "connected" if settings.database_url else "unconfigured",
         "openrouter": "configured" if settings.openrouter_api_key else "unconfigured",
+        "local_test_mode": settings.local_test_mode,
     }
 
 
@@ -341,6 +354,73 @@ async def debug_stats():
         }
     finally:
         db.close()
+
+
+@app.post("/debug/test-engagement")
+async def debug_test_engagement(payload: dict, background_tasks: BackgroundTasks):
+    """
+    DEBUG ENDPOINT: Inject a synthetic engagement payload directly into the
+    pipeline.
+
+    This is intended for local personal-account testing. It skips LinkedIn
+    signature checks and only runs when both DEBUG and LOCAL_TEST_MODE are
+    enabled.
+    """
+    if not settings.debug or not settings.local_test_mode:
+        raise HTTPException(status_code=403, detail="Local test mode disabled")
+
+    background_tasks.add_task(process_engagement, payload)
+    return {
+        "status": "queued",
+        "mode": "local-test",
+    }
+
+
+@app.post("/debug/preview-reply")
+async def debug_preview_reply(payload: dict):
+    """
+    DEBUG ENDPOINT: Generate and return a reply preview for a personal-account
+    comment or message.
+
+    Use this when you want to see how the agent would respond without needing
+    LinkedIn org permissions, webhook signatures, or posting access.
+    """
+    if not settings.debug or not settings.local_test_mode:
+        raise HTTPException(status_code=403, detail="Local test mode disabled")
+
+    engagement_text = payload.get("text", "")
+    if not engagement_text:
+        raise HTTPException(status_code=400, detail="Missing text")
+
+    engagement_type = payload.get("type", "comment")
+    persona = PersonaContext(
+        linkedin_urn=payload.get("actor", {}).get("urn", "urn:li:person:test"),
+        name=payload.get("name", "Friend"),
+        tier=payload.get("tier", "D_general"),
+        relationship_to_us=payload.get("relationship_to_us", "unknown"),
+        company=payload.get("company"),
+        role_guess=payload.get("role_guess"),
+        confidence_score=float(payload.get("confidence_score", 0.5)),
+        is_vip=bool(payload.get("is_vip", False)),
+        is_own_ceo=bool(payload.get("is_own_ceo", False)),
+        voice_note=payload.get("voice_note"),
+    )
+
+    reply = response_generator.generate(engagement_text, persona, engagement_type)
+
+    return {
+        "mode": "preview",
+        "persona": {
+            "name": persona.name,
+            "tier": persona.tier,
+            "confidence_score": persona.confidence_score,
+            "relationship_to_us": persona.relationship_to_us,
+            "company": persona.company,
+        },
+        "engagement_type": engagement_type,
+        "engagement_text": engagement_text,
+        "reply": reply,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
