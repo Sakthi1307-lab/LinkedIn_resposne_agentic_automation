@@ -37,6 +37,22 @@ class ResponseGenerator:
         r"\b(financial|tax) advice\b",
     ]
 
+    # Structural words excluded when checking whether a reply actually
+    # engages with the specific engagement_text (see _specificity_lint).
+    STOPWORDS = {
+        "this", "that", "with", "from", "have", "what", "when", "where",
+        "would", "could", "should", "about", "your", "there", "which",
+        "their", "just", "really", "very", "been", "were", "also", "into",
+        "them", "then", "than", "only", "more", "some", "such", "does",
+        "did", "doing", "here",
+    }
+
+    # A generic reply that reads fine but says nothing tied to what was
+    # actually written gets one retry with a sharper instruction before
+    # falling back to a canned safe reply. Keeping this small bounds the
+    # extra LLM cost per engagement.
+    MAX_GENERATION_ATTEMPTS = 2
+
     def __init__(self):
         self.voice_rules = self._load_voice_rules()
         self.templates = self._load_templates()
@@ -83,10 +99,11 @@ class ResponseGenerator:
 
         Returns:
             Generated reply text (ready to post). Always on-brand, legally
-            safe, and matched to what was actually said — falls back to
-            _fallback_reply() if generation fails or the output doesn't
-            pass _voice_lint()/_legal_lint(). There is no path that returns
-            an unlinted reply.
+            safe, and specific to what was actually said — falls back to
+            _fallback_reply() if generation fails, or if MAX_GENERATION_ATTEMPTS
+            drafts in a row all fail _voice_lint()/_legal_lint()/
+            _specificity_lint(). There is no path that returns an unlinted
+            or generic-filler reply.
         """
 
         # Step 1: Classify what was actually said (content) — independent
@@ -102,32 +119,50 @@ class ResponseGenerator:
         # Step 4: Select model based on persona tier (routing lives in llm_client)
         model = llm_client.select_model(persona.tier)
 
-        # Step 5: Call the LLM — always through llm_client, never the SDK directly
-        try:
-            reply, tokens = llm_client.generate_reply(
-                system_prompt=system_prompt,
-                user_message=user_message,
-                model=model,
-                max_tokens=150,
-                temperature=0.7,
-            )
-
-            logger.info(f"Generated reply ({persona.tier}, {content_type}): {reply[:80]}...")
-
-            # Step 6: Voice + legal lint — the only quality gates; no bypass path
-            if not self._voice_lint(reply):
-                logger.warning("Reply failed voice lint, falling back to safe reply")
+        # Step 5: Call the LLM — always through llm_client, never the SDK directly.
+        # A first draft that's on-brand and legal but generic (e.g. "Appreciate
+        # the note, that's exactly the signal we want to hear" for someone who
+        # asked "how do I see a demo?") gets one retry with a sharper,
+        # failure-specific instruction appended to the same system prompt
+        # before we give up and fall back to a canned reply.
+        retry_note = ""
+        for attempt in range(1, self.MAX_GENERATION_ATTEMPTS + 1):
+            try:
+                reply, tokens = llm_client.generate_reply(
+                    system_prompt=system_prompt + retry_note,
+                    user_message=user_message,
+                    model=model,
+                    max_tokens=150,
+                    temperature=0.7,
+                )
+            except Exception as e:
+                logger.error(f"Generation failed (attempt {attempt}): {e}", exc_info=True)
                 return self._fallback_reply(persona, engagement_text, content_type)
+
+            logger.info(f"Generated reply attempt {attempt} ({persona.tier}, {content_type}): {reply[:80]}...")
+
+            if not self._voice_lint(reply):
+                logger.warning(f"Attempt {attempt} failed voice lint")
+                retry_note = self._retry_instruction("voice")
+                continue
 
             if not self._legal_lint(reply):
-                logger.warning("Reply failed legal/compliance lint, falling back to safe reply")
-                return self._fallback_reply(persona, engagement_text, content_type)
+                logger.warning(f"Attempt {attempt} failed legal/compliance lint")
+                retry_note = self._retry_instruction("legal")
+                continue
+
+            if not self._specificity_lint(reply, engagement_text):
+                logger.warning(f"Attempt {attempt} was too generic for the engagement text")
+                retry_note = self._retry_instruction("specificity", engagement_text)
+                continue
 
             return reply
 
-        except Exception as e:
-            logger.error(f"Generation failed: {e}", exc_info=True)
-            return self._fallback_reply(persona, engagement_text, content_type)
+        logger.warning(
+            f"All {self.MAX_GENERATION_ATTEMPTS} generation attempts failed lint checks, "
+            "falling back to safe reply"
+        )
+        return self._fallback_reply(persona, engagement_text, content_type)
 
     def _detect_content_type(self, engagement_text: str) -> str:
         """
@@ -200,7 +235,10 @@ REPLY CONSTRAINTS:
 - Never say "Thanks for the comment!" or "Great question!"
 - One idea per sentence
 - Max 1 emoji (usually 0 for comment replies)
-- Be specific to what they said — never generic affirmation
+- Name the specific thing they said or asked about — a reply that could
+  paste under any other comment unchanged is a failed reply. Do not
+  respond with only generic appreciation (e.g. "appreciate the note",
+  "love that", "that's exactly the kind of signal we want to hear").
 """
 
         # Persona-specific tone
@@ -221,7 +259,7 @@ REPLY CONSTRAINTS:
         if content_type == "critical_feedback":
             content_guidance = "\nREPLY TYPE: CRITICAL FEEDBACK\nNever defensive. Never dismiss. Acknowledge their specific critique. Respond with substance or an honest 'fair point' where warranted."
         elif content_type == "substantive_question":
-            content_guidance = "\nREPLY TYPE: SUBSTANTIVE QUESTION\nAnswer their question directly. One follow-up insight if relevant. Optional soft CTA only if it lands naturally."
+            content_guidance = "\nREPLY TYPE: SUBSTANTIVE QUESTION\nAnswer their specific question concretely — name the thing they asked about. If you don't have an exact detail to give (a link, a process, a number), don't invent one; give an honest, concrete next step instead (e.g. 'reply here and we'll set it up directly'). Never respond with appreciation alone and no answer."
         elif content_type == "acknowledgment_praise":
             content_guidance = "\nREPLY TYPE: ACKNOWLEDGMENT/PRAISE\nSpecific mention of what they said (no 'thanks for the feedback'). One insight or affirming fact."
         else:  # neutral_comment
@@ -274,9 +312,9 @@ said — not a generic template. Remember:
         Quality gate: does this reply pass brand voice checks?
         Returns True if it passes, False if it should be regenerated.
 
-        Paired with _legal_lint() as the only two quality gates in the
-        pipeline — generate() has no path that returns a reply that failed
-        either one.
+        Paired with _legal_lint() and _specificity_lint() as the three
+        quality gates in the pipeline — generate() has no path that returns
+        a reply that failed any of them on every attempt.
         """
 
         reply_lower = reply.lower()
@@ -292,7 +330,10 @@ said — not a generic template. Remember:
                 logger.warning(f"Reply contains banned word: '{banned}'")
                 return False
 
-        # Check for filler phrases
+        # Check for filler phrases — includes generic-appreciation stock
+        # phrases the model tends to reach for when it has nothing specific
+        # to say (e.g. "appreciate the note ... that's exactly the kind of
+        # signal we want to hear" for a comment that asked a real question).
         filler_phrases = [
             "thanks for the comment",
             "great question",
@@ -300,6 +341,10 @@ said — not a generic template. Remember:
             "thanks for the feedback",
             "how can we help",
             "feel free to reach out",
+            "appreciate the note",
+            "kind of signal",
+            "signal we want to hear",
+            "exactly the kind of",
         ]
         for filler in filler_phrases:
             if filler in reply_lower:
@@ -333,6 +378,59 @@ said — not a generic template. Remember:
                 logger.warning(f"Reply failed legal lint: matched pattern '{pattern}'")
                 return False
         return True
+
+    def _specificity_lint(self, reply: str, engagement_text: str) -> bool:
+        """
+        Does the reply actually engage with what this person said, or is it
+        filler that could paste under any comment unchanged? Requires the
+        reply to reuse at least one non-trivial word (4+ letters, not a
+        structural stopword) from engagement_text — a cheap but effective
+        proxy for "this wasn't canned."
+
+        This is a heuristic, not semantic understanding: a reply that
+        legitimately paraphrases without reusing the same words (e.g.
+        answers "pricing" with "cost") can trip it and cost a retry. That
+        tradeoff is intentional — false-positive retries are cheap; a
+        generic reply going out to a real comment is not.
+
+        engagement_text too short to have any non-stopword 4+ letter word
+        (e.g. a single reaction emoji) has nothing to anchor on, so it's
+        exempt rather than auto-failed.
+        """
+        reply_lower = reply.lower()
+        words = re.findall(r"[a-z]{4,}", engagement_text.lower())
+        significant = [w for w in words if w not in self.STOPWORDS]
+        if not significant:
+            return True
+        return any(w in reply_lower for w in significant)
+
+    def _retry_instruction(self, reason: str, engagement_text: str = "") -> str:
+        """
+        Appended to the system prompt for a second generation attempt after
+        the first draft failed one of the three lints. Naming the specific
+        failure (rather than a generic "try again") measurably improves
+        whether the retry actually fixes it.
+        """
+        if reason == "specificity":
+            return (
+                f"\n\nRETRY: Your previous draft was generic — it could have replied to "
+                f'almost any comment. Reference something specific from what they actually '
+                f'said: "{engagement_text}". If they asked a question, answer it concretely '
+                f"instead of only expressing appreciation."
+            )
+        if reason == "voice":
+            return (
+                "\n\nRETRY: Your previous draft broke a brand voice rule (a banned word or "
+                "a filler phrase like 'thanks for the comment' / 'great question' / "
+                "'appreciate the note'). Avoid that this time."
+            )
+        if reason == "legal":
+            return (
+                "\n\nRETRY: Your previous draft made a guarantee, pricing/refund claim, or "
+                "compliance claim. Do not do that — describe capability without promising "
+                "outcomes."
+            )
+        return ""
 
     def _fallback_reply(self, persona: PersonaContext, engagement_text: str, content_type: str = "neutral_comment") -> str:
         """
