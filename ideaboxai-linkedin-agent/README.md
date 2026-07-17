@@ -48,7 +48,25 @@ talking to us (persona tier) — never *whether* to reply.
    python -c "from config import settings; print(settings.database_url)"
    ```
 
-4. Run the app:
+4. Before going live, run the pre-flight check — it verifies the current
+   `.env` can actually reach both LinkedIn and OpenRouter, and exits without
+   starting the server or posting anything:
+
+   ```bash
+   python main.py --preflight
+   ```
+
+   This exists because both failure modes it catches are otherwise silent:
+   a missing or rejected `OPENROUTER_API_KEY` makes every reply a static
+   canned string from `llm_client._fallback_reply()` with no error at all —
+   it looks like real generation but never calls an LLM. And a LinkedIn
+   token that's valid but lacks Community Management API scope for your
+   organization (unverified app, no partner approval yet, wrong org URN)
+   only 403s when the poller happens to run, and `get_new_comments()`
+   swallows that into an empty list rather than surfacing it. Run this
+   after every credential change.
+
+5. Run the app:
 
    ```bash
    python main.py
@@ -56,7 +74,7 @@ talking to us (persona tier) — never *whether* to reply.
 
    Visit `http://localhost:8000/health`.
 
-5. Print the version without starting the server:
+6. Print the version without starting the server:
 
    ```bash
    python main.py --version

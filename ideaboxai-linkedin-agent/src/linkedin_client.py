@@ -156,6 +156,52 @@ class LinkedInClient:
             return []
 
     # ═════════════════════════════════════════════════════════════════════════
+    # PRE-FLIGHT CONNECTIVITY CHECK
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def check_connectivity(self) -> dict:
+        """
+        Pre-flight check: can this token actually read comments on the
+        configured organization page — the exact capability poll_linkedin()
+        and the webhook pipeline depend on?
+
+        Deliberately exercises the real GET /mmComments call (limit=1)
+        rather than a proxy signal like /v2/me: a token can be "valid" and
+        still lack Community Management API scope for this specific
+        organization (unverified app, no partner approval, wrong org URN),
+        and that's exactly the failure mode worth catching before going
+        live. get_new_comments() swallows every failure into [], which is
+        the right behavior for the polling loop but useless for diagnosing
+        *why* — this returns the real status instead.
+        """
+        try:
+            response = requests.get(
+                f"{self.BASE_URL}/mmComments",
+                headers=self.headers,
+                params={"q": "organization", "organizationId": self.org_urn, "limit": 1},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                return {"ok": True, "detail": f"Token can read comments on {self.org_urn}."}
+            elif response.status_code == 401:
+                return {"ok": False, "detail": "401 Unauthorized — token is missing, expired, or invalid."}
+            elif response.status_code == 403:
+                return {
+                    "ok": False,
+                    "detail": (
+                        "403 Forbidden — token lacks Community Management API scope for this "
+                        "organization, the app isn't approved for it, or the app isn't verified "
+                        "as associated with this page."
+                    ),
+                }
+            else:
+                return {"ok": False, "detail": f"Unexpected status {response.status_code}: {response.text[:200]}"}
+        except requests.exceptions.Timeout:
+            return {"ok": False, "detail": "Timed out reaching LinkedIn API (10s)."}
+        except requests.exceptions.RequestException as e:
+            return {"ok": False, "detail": f"Network error reaching LinkedIn API: {e}"}
+
+    # ═════════════════════════════════════════════════════════════════════════
     # POST REPLY TO COMMENT
     # ═════════════════════════════════════════════════════════════════════════
 

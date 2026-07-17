@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Tuple
 
+import requests
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -137,6 +138,63 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Unexpected error generating reply: {e}", exc_info=True)
             raise
+
+    def check_connectivity(self) -> dict:
+        """
+        Pre-flight check: is this client actually able to reach OpenRouter,
+        or silently running in local-fallback stub mode?
+
+        _client is constructed once, at module import time, from whatever
+        OPENROUTER_API_KEY was present then (see the module-level `if
+        settings.openrouter_api_key:` block above). An unset, empty, or
+        placeholder-rejected key means _client is None forever for this
+        process — every generate_reply() call after that quietly returns
+        _fallback_reply()'s static canned string instead of ever calling
+        OpenRouter, with no exception and no error log. Every prompt
+        variation in response_generator.py is inert against that path,
+        since the text never depends on what was actually asked. This
+        check makes that condition loud and explicit instead of silently
+        producing plausible-looking replies that aren't real generation.
+
+        Uses OpenRouter's key-info endpoint (GET /auth/key) rather than an
+        actual chat completion — it validates the key and costs nothing.
+        """
+        if _client is None:
+            return {
+                "ok": False,
+                "mode": "local_fallback_stub",
+                "detail": (
+                    "OPENROUTER_API_KEY is not set (or was rejected as a placeholder). "
+                    "Every reply will be one of three static canned strings from "
+                    "_fallback_reply(), not real generation."
+                ),
+            }
+
+        try:
+            response = requests.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                data = response.json().get("data", {})
+                return {
+                    "ok": True,
+                    "mode": "live",
+                    "detail": f"Key valid. Limit: {data.get('limit')}, usage: {data.get('usage')}.",
+                }
+            elif response.status_code == 401:
+                return {"ok": False, "mode": "live_invalid_key", "detail": "OpenRouter rejected the API key (401)."}
+            else:
+                return {
+                    "ok": False,
+                    "mode": "live_error",
+                    "detail": f"OpenRouter returned {response.status_code}: {response.text[:200]}",
+                }
+        except requests.exceptions.Timeout:
+            return {"ok": False, "mode": "network_error", "detail": "Timed out reaching OpenRouter (10s)."}
+        except requests.exceptions.RequestException as e:
+            return {"ok": False, "mode": "network_error", "detail": f"Could not reach OpenRouter: {e}"}
 
     def _fallback_reply(self, system_prompt: str, user_message: str) -> str:
         """

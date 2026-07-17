@@ -451,13 +451,53 @@ async def debug_preview_reply(payload: dict):
 def _parse_args():
     parser = argparse.ArgumentParser(description="IdeaBoxAI Engage")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Check LinkedIn + OpenRouter connectivity with the current .env and exit "
+        "(no server started, nothing posted)",
+    )
     return parser.parse_args()
+
+
+def _run_preflight() -> bool:
+    """
+    Verify the current .env can actually reach both external dependencies
+    before anything goes live. Returns True iff both checks pass (or are
+    intentionally skipped) — the caller decides the process exit code.
+
+    This exists because both failure modes it catches are silent otherwise:
+    a missing/rejected OPENROUTER_API_KEY makes llm_client fall back to a
+    static canned reply with no error at all (see LLMClient.check_connectivity's
+    docstring), and a token that's valid but lacks org-page scope 403s only
+    when poll_linkedin() happens to run, which get_new_comments() swallows
+    into an empty list rather than surfacing.
+    """
+    print("Running pre-flight checks against the current .env...\n")
+
+    llm_result = llm_client.check_connectivity()
+    print(f"[{'OK' if llm_result['ok'] else 'FAIL'}] OpenRouter (LLM): {llm_result['detail']}")
+
+    if settings.local_test_mode:
+        print("[SKIP] LinkedIn organization connectivity — LOCAL_TEST_MODE is enabled.")
+        linkedin_ok = True
+    else:
+        li_result = linkedin_client.check_connectivity()
+        print(f"[{'OK' if li_result['ok'] else 'FAIL'}] LinkedIn (org comments): {li_result['detail']}")
+        linkedin_ok = li_result["ok"]
+
+    print()
+    all_ok = llm_result["ok"] and linkedin_ok
+    print("All checks passed — ready to run live." if all_ok else "Pre-flight failed — fix the above before running live.")
+    return all_ok
 
 
 if __name__ == "__main__":
     args = _parse_args()
     if args.version:
         print("IdeaBoxAI Engage 1.0.0")
+    elif args.preflight:
+        sys.exit(0 if _run_preflight() else 1)
     else:
         import uvicorn
 
