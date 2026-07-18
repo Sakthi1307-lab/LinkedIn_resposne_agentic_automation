@@ -39,6 +39,29 @@ scheduler = AsyncIOScheduler()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@app.get("/webhook/linkedin")
+async def webhook_challenge(request: Request):
+    """
+    LinkedIn's webhook endpoint-validation handshake.
+
+    Before it will send (or keep sending) events, LinkedIn GETs this URL with a
+    ?challengeCode=<uuid> and expects back, within 3 seconds and as JSON 200:
+        {"challengeCode": <the code>, "challengeResponse": HMAC hex}
+    LinkedIn re-validates every 2 hours; 3 consecutive failures block the
+    endpoint. See linkedin_client.compute_challenge_response for the HMAC.
+    """
+    challenge_code = request.query_params.get("challengeCode", "")
+    if not challenge_code:
+        raise HTTPException(status_code=400, detail="Missing challengeCode")
+
+    response = {
+        "challengeCode": challenge_code,
+        "challengeResponse": linkedin_client.compute_challenge_response(challenge_code),
+    }
+    logger.info("Answered LinkedIn webhook validation challenge")
+    return response
+
+
 @app.post("/webhook/linkedin")
 async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     """
@@ -51,7 +74,9 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     fast response regardless of how long the pipeline takes.
     """
     body = await request.body()
-    signature = request.headers.get("X-LinkedIn-Signature", "")
+    # LinkedIn signs events with the X-LI-Signature header (hex HMAC of
+    # "hmacsha256=" + raw body, keyed by the app Client Secret).
+    signature = request.headers.get("X-LI-Signature", "")
     local_test_header = request.headers.get("X-Local-Test", "false").lower() == "true"
 
     # Verify signature
@@ -282,7 +307,8 @@ async def startup():
 async def shutdown():
     """Cleanup on shutdown."""
     logger.info("IdeaBoxAI Engage shutting down...")
-    scheduler.shutdown()
+    if scheduler.running:
+        scheduler.shutdown()
     logger.info("Scheduler stopped")
 
 

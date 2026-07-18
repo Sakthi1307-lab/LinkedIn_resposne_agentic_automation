@@ -16,16 +16,35 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+def _resolve_base_url(key: str) -> str:
+    """
+    Pick the API base URL from the key (or an explicit override).
+
+    - sk-or-... keys are OpenRouter keys      -> OpenRouter base URL
+    - any other sk-... key is a direct OpenAI key -> OpenAI base URL
+    Both speak the same OpenAI-compatible API, so the client code is identical;
+    only the base URL and model naming differ (see _normalize_model).
+    """
+    override = getattr(settings, "llm_base_url", None)
+    if override:
+        return override
+    if key.startswith("sk-or-"):
+        return "https://openrouter.ai/api/v1"
+    return "https://api.openai.com/v1"
+
+
+_api_key = settings.openrouter_api_key or ""
+_base_url = _resolve_base_url(_api_key)
+# True when talking to OpenAI directly (so we must strip provider prefixes and
+# can't route to Claude models).
+_is_openai_direct = _base_url.startswith("https://api.openai.com")
+
 _client = None
-if settings.openrouter_api_key:
-    # OpenRouter exposes an OpenAI-compatible API at this base URL.
-    # NOTE: the installed `openai` SDK is v1.x, which uses the client-object
-    # pattern (OpenAI(...).chat.completions.create(...)) rather than the old
-    # module-level openai.ChatCompletion.create() from the v0.x SDK.
-    _client = OpenAI(
-        api_key=settings.openrouter_api_key,
-        base_url="https://openrouter.ai/api/v1",
-    )
+if _api_key:
+    # OpenRouter and OpenAI both expose an OpenAI-compatible API. The installed
+    # `openai` SDK is v1.x (client-object pattern), not the v0.x module-level API.
+    _client = OpenAI(api_key=_api_key, base_url=_base_url)
+    logger.info(f"LLM client using base URL: {_base_url}")
 
 # Exceptions worth retrying: rate limits, transient network issues, and
 # 5xx server errors. AuthenticationError is deliberately excluded — a bad
@@ -148,9 +167,15 @@ class LLMClient:
         match = re.search(r'Engagement from (.+?) \(', user_message)
         name = match.group(1) if match else "there"
 
-        if "critical_feedback" in system_prompt:
+        # Match the reply-type markers response_generator actually emits in
+        # the system prompt ("REPLY TYPE: CRITICAL FEEDBACK", etc.). These are
+        # uppercase with spaces, so compare against a lowercased copy — the old
+        # underscore markers ("critical_feedback") never matched, collapsing
+        # every offline reply to the generic acknowledgment line.
+        prompt_lower = system_prompt.lower()
+        if "critical feedback" in prompt_lower:
             return f"Fair point, {name}. We’re looking at this closely and want to improve the experience."
-        if "substantive_question" in system_prompt:
+        if "substantive question" in prompt_lower:
             return f"Good question, {name}. We keep the approach focused and practical so the answer stays useful."
         return f"Appreciate the note, {name}. That’s exactly the kind of signal we want to hear."
 

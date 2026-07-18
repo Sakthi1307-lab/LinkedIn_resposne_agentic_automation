@@ -9,6 +9,14 @@ class Settings(BaseSettings):
     linkedin_access_token: Optional[str] = None
     linkedin_organization_urn: Optional[str] = None
     linkedin_webhook_verification_token: Optional[str] = None
+    # The app's OAuth Client Secret. LinkedIn signs BOTH the webhook challenge
+    # handshake and every event POST with this (not the verification token
+    # above). Required for the webhook to validate/register and for signature
+    # checks to pass. See https://learn.microsoft.com/en-us/linkedin/shared/api-guide/webhook-validation
+    linkedin_client_secret: Optional[str] = None
+    # Community Management API version header (YYYYMM). Bump as LinkedIn
+    # deprecates older versions (they keep ~12 months active).
+    linkedin_api_version: str = "202606"
 
     # OpenRouter
     openrouter_api_key: Optional[str] = None
