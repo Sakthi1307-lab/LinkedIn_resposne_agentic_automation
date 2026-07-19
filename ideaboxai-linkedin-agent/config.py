@@ -9,10 +9,11 @@ class Settings(BaseSettings):
     linkedin_access_token: Optional[str] = None
     linkedin_organization_urn: Optional[str] = None
     linkedin_webhook_verification_token: Optional[str] = None
-    # The app's OAuth Client Secret. LinkedIn signs BOTH the webhook challenge
-    # handshake and every event POST with this (not the verification token
-    # above). Required for the webhook to validate/register and for signature
-    # checks to pass. See https://learn.microsoft.com/en-us/linkedin/shared/api-guide/webhook-validation
+    # The app's OAuth Client ID + Secret (Developer Portal > app > Auth tab).
+    # The secret signs BOTH the webhook challenge handshake and every event POST
+    # (not the verification token above) and is used to mint access tokens.
+    # See https://learn.microsoft.com/en-us/linkedin/shared/api-guide/webhook-validation
+    linkedin_client_id: Optional[str] = None
     linkedin_client_secret: Optional[str] = None
     # Community Management API version header (YYYYMM). Bump as LinkedIn
     # deprecates older versions (they keep ~12 months active).
@@ -77,15 +78,30 @@ try:
     settings = Settings()
 except ValidationError as exc:
     missing_fields = []
+    unknown_keys = []
     for error in exc.errors():
         if error.get("type") == "missing":
             location = error.get("loc", ())
             if location:
                 missing_fields.append(str(location[0]).upper())
+        elif error.get("type") == "extra_forbidden":
+            # A key exists in .env that has no matching field on Settings.
+            # Without calling this out by name the failure is near-impossible
+            # to diagnose from the generic message below.
+            location = error.get("loc", ())
+            if location:
+                unknown_keys.append(str(location[0]).upper())
         elif error.get("type") == "value_error":
             message = error.get("msg", "")
             if "Missing required configuration:" in message:
                 missing_fields.extend(message.split(":", 1)[1].strip().split(", "))
+
+    if unknown_keys:
+        raise RuntimeError(
+            "Unknown configuration key(s) in .env: "
+            f"{', '.join(unknown_keys)}. "
+            "Either remove them or add matching fields to Settings in config.py."
+        ) from None
 
     if missing_fields:
         missing_list = ", ".join(missing_fields)

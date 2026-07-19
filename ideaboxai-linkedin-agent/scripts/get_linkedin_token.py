@@ -110,11 +110,24 @@ def main():
     parser.add_argument("--write-env", action="store_true", help="Write the token into .env")
     args = parser.parse_args()
 
-    client_id = os.environ.get("LINKEDIN_CLIENT_ID")
-    client_secret = os.environ.get("LINKEDIN_CLIENT_SECRET")
+    # Prefer real environment variables, but fall back to .env so you can just
+    # fill the file once instead of exporting shell vars every run.
+    from dotenv import dotenv_values
+
+    env_file = dotenv_values(".env")
+    client_id = os.environ.get("LINKEDIN_CLIENT_ID") or env_file.get("LINKEDIN_CLIENT_ID")
+    client_secret = os.environ.get("LINKEDIN_CLIENT_SECRET") or env_file.get("LINKEDIN_CLIENT_SECRET")
+
     if not client_id or not client_secret:
-        print("ERROR: set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET env vars first.")
-        print("  Find both on your app's Auth tab in the LinkedIn developer portal.")
+        print("ERROR: LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET not found.")
+        print("  Add them to your .env file (or export them as env vars):")
+        print("    LINKEDIN_CLIENT_ID=784r8dyvcllgq7")
+        print("    LINKEDIN_CLIENT_SECRET=<from your app's Auth tab>")
+        sys.exit(1)
+
+    if "your_" in client_secret or client_secret.startswith("<"):
+        print("ERROR: LINKEDIN_CLIENT_SECRET is still a placeholder. Paste the real")
+        print("  Primary Client Secret from the app's Auth tab (click 'Show').")
         sys.exit(1)
 
     auth_params = {
