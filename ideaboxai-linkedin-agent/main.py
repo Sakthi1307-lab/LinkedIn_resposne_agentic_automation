@@ -35,17 +35,41 @@ app = FastAPI(
 scheduler = AsyncIOScheduler()
 
 # linkedin_client.post_reply() only knows how to post a public comment reply
-# via the Community Management API's /mmComments endpoint — there is no DM
-# path (send_dm() is an explicit unsupported stub) and no separate "reaction"
-# posting semantics. Auto-posting a dm- or reaction-sourced payload through
-# post_reply() would either post private conversation content publicly or
-# attach a reply to a URN that was never a real comment thread. Only these
-# two engagement types are safe to carry all the way to a public post.
+# via the Community Management API's /rest/socialActions/{urn}/comments
+# endpoint, as the organization — there is no DM path (send_dm() is an
+# explicit unsupported stub) and no separate "reaction" posting semantics.
+# Auto-posting a dm- or reaction-sourced payload through post_reply() would
+# either post private conversation content publicly or attach a reply to a
+# URN that was never a real comment thread. Only these two engagement types
+# are safe to carry all the way to a public post.
 SUPPORTED_PUBLIC_REPLY_TYPES = {"comment", "mention"}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK ENDPOINT — LinkedIn pushes engagement events here
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/webhook/linkedin")
+async def webhook_challenge(request: Request):
+    """
+    LinkedIn's webhook endpoint-validation handshake.
+
+    Before it will send (or keep sending) events, LinkedIn GETs this URL with a
+    ?challengeCode=<uuid> and expects back, within 3 seconds and as JSON 200:
+        {"challengeCode": <the code>, "challengeResponse": HMAC hex}
+    LinkedIn re-validates every 2 hours; 3 consecutive failures block the
+    endpoint. See linkedin_client.compute_challenge_response for the HMAC.
+    """
+    challenge_code = request.query_params.get("challengeCode", "")
+    if not challenge_code:
+        raise HTTPException(status_code=400, detail="Missing challengeCode")
+
+    response = {
+        "challengeCode": challenge_code,
+        "challengeResponse": linkedin_client.compute_challenge_response(challenge_code),
+    }
+    logger.info("Answered LinkedIn webhook validation challenge")
+    return response
 
 
 @app.post("/webhook/linkedin")
@@ -60,7 +84,9 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     fast response regardless of how long the pipeline takes.
     """
     body = await request.body()
-    signature = request.headers.get("X-LinkedIn-Signature", "")
+    # LinkedIn signs events with the X-LI-Signature header (hex HMAC of
+    # "hmacsha256=" + raw body, keyed by the app Client Secret).
+    signature = request.headers.get("X-LI-Signature", "")
     local_test_header = request.headers.get("X-Local-Test", "false").lower() == "true"
 
     # Verify signature
@@ -302,7 +328,8 @@ async def startup():
 async def shutdown():
     """Cleanup on shutdown."""
     logger.info("IdeaBoxAI Engage shutting down...")
-    scheduler.shutdown()
+    if scheduler.running:
+        scheduler.shutdown()
     logger.info("Scheduler stopped")
 
 
@@ -476,7 +503,7 @@ def _run_preflight() -> bool:
     print("Running pre-flight checks against the current .env...\n")
 
     llm_result = llm_client.check_connectivity()
-    print(f"[{'OK' if llm_result['ok'] else 'FAIL'}] OpenRouter (LLM): {llm_result['detail']}")
+    print(f"[{'OK' if llm_result['ok'] else 'FAIL'}] LLM ({llm_result.get('mode', 'unknown')}): {llm_result['detail']}")
 
     if settings.local_test_mode:
         print("[SKIP] LinkedIn organization connectivity — LOCAL_TEST_MODE is enabled.")

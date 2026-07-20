@@ -1,0 +1,41 @@
+[
+  {
+    "note": "General audience — praise",
+    "text": "Love this take on AI agents! Been following your posts for a while.",
+    "type": "comment",
+    "name": "Ravi",
+    "tier": "D_general",
+    "actor": { "urn": "urn:li:person:dummy-ravi" }
+  },
+  {
+    "note": "General audience — question",
+    "text": "How do you keep the replies on-brand at scale without them sounding robotic?",
+    "type": "comment",
+    "name": "Priya",
+    "tier": "D_general",
+    "actor": { "urn": "urn:li:person:dummy-priya" }
+  },
+  {
+    "note": "Prospect — critical feedback",
+    "text": "Honestly the demo felt broken. It failed twice for me and I gave up.",
+    "type": "comment",
+    "name": "Marcus",
+    "tier": "C_decision_maker",
+    "role_guess": "VP Sales",
+    "company": "NorthPeak",
+    "confidence_score": 0.72,
+    "actor": { "urn": "urn:li:person:dummy-marcus" }
+  },
+  {
+    "note": "External VIP founder",
+    "text": "Sharp framing. What does the personalization actually cost per query at volume?",
+    "type": "comment",
+    "name": "Elena",
+    "tier": "B_external_vip",
+    "company": "Foundry Labs",
+    "is_vip": true,
+    "confidence_score": 0.9,
+    "voice_note": "Founder we respect; keep it peer-to-peer, no pitch.",
+    "actor": { "urn": "urn:li:person:dummy-elena" }
+  }
+]
